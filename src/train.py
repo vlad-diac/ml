@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -65,6 +66,64 @@ def keras_custom_objects() -> dict:
         "iou_metric": iou_metric,
         "BinaryIoU": tf.keras.metrics.BinaryIoU,
     }
+
+
+def _has_cuda_gpu() -> bool:
+    """Return True if nvidia-smi exits successfully (NVIDIA GPU + driver present)."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _setup_hardware(train_cfg: dict) -> None:
+    """Configure mixed precision and XLA based on config + auto-detected hardware.
+
+    mixed_precision values: auto | mixed_float16 | mixed_bfloat16 | float32
+    xla values: auto | true | false
+
+    auto (both): CUDA GPU detected  → mixed_float16 + XLA
+                 no CUDA detected   → mixed_float16 only (safe for Metal / CPU)
+    """
+    mp_cfg = str(train_cfg.get("mixed_precision", "auto")).strip().lower()
+    xla_cfg = str(train_cfg.get("xla", "auto")).strip().lower()
+
+    cuda = _has_cuda_gpu()
+    hw_label = "CUDA GPU" if cuda else "CPU / Apple Metal"
+    print(f"[hardware] Detected hardware: {hw_label}")
+
+    # Mixed precision policy
+    if mp_cfg == "auto":
+        policy = "mixed_float16"
+    elif mp_cfg in ("mixed_float16", "mixed_bfloat16", "float32"):
+        policy = mp_cfg
+    else:
+        print(f"[hardware] Unknown mixed_precision={mp_cfg!r}; defaulting to mixed_float16")
+        policy = "mixed_float16"
+
+    tf.keras.mixed_precision.set_global_policy(policy)
+    print(f"[hardware] Mixed precision policy: {policy}")
+
+    # XLA (JIT compilation — only beneficial with CUDA; can cause issues on Metal)
+    enable_xla: bool
+    if xla_cfg == "auto":
+        enable_xla = cuda
+    elif xla_cfg == "true":
+        enable_xla = True
+    else:
+        enable_xla = False
+
+    if enable_xla:
+        tf.config.optimizer.set_jit(True)
+        print("[hardware] XLA (JIT) enabled")
+    else:
+        print("[hardware] XLA (JIT) disabled")
 
 
 def _safe_dataset_name(name: str) -> str:
@@ -282,8 +341,11 @@ def main(
 
     img_size = int(data_cfg["img_size"])
     batch_size = int(data_cfg["batch_size"])
+    shuffle_buffer = int(data_cfg.get("shuffle_buffer", 1024))
+    drop_remainder = bool(data_cfg.get("drop_remainder", False))
     epochs = int(train_cfg["epochs"])
     lr = float(train_cfg["learning_rate"])
+    weight_decay = float(train_cfg.get("weight_decay", 0.0))
     freeze_backbone = bool(train_cfg["freeze_backbone"])
 
     resume_path = resume_from
@@ -319,6 +381,8 @@ def main(
     for p in (best_path.parent, final_path.parent, log_csv.parent):
         p.mkdir(parents=True, exist_ok=True)
 
+    _setup_hardware(train_cfg)
+
     print("TensorFlow:", tf.__version__)
     print("Devices:", tf.config.list_physical_devices())
     print("Data root:", root.resolve())
@@ -333,7 +397,12 @@ def main(
     print(f"Val pairs: {len(val_pairs)}")
 
     train_ds = make_tf_dataset(
-        train_pairs, img_size, batch_size, training=True
+        train_pairs,
+        img_size,
+        batch_size,
+        training=True,
+        shuffle_buffer_size=shuffle_buffer,
+        drop_remainder=drop_remainder,
     )
     val_ds = make_tf_dataset(val_pairs, img_size, batch_size, training=False)
     val_ds = val_ds.repeat()
@@ -381,9 +450,10 @@ def main(
                 f"Warning: checkpoint input width {in_sh[2]} != config img_size {img_size}"
             )
         if model.optimizer is None:
-            tf.keras.mixed_precision.set_global_policy("mixed_float16")
             model.compile(
-                optimizer=keras.optimizers.Adam(lr),
+                optimizer=keras.optimizers.Adam(
+                    learning_rate=lr, weight_decay=weight_decay
+                ),
                 loss=combined_loss,
                 metrics=["accuracy", _make_binary_iou()],
             )
@@ -396,9 +466,10 @@ def main(
             pretrained=pretrained,
             freeze_backbone=freeze_backbone,
         )
-        tf.keras.mixed_precision.set_global_policy("mixed_float16")
         model.compile(
-            optimizer=keras.optimizers.Adam(lr),
+            optimizer=keras.optimizers.Adam(
+                learning_rate=lr, weight_decay=weight_decay
+            ),
             loss=combined_loss,
             metrics=["accuracy", _make_binary_iou()],
         )

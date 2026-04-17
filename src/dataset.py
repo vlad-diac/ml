@@ -72,6 +72,8 @@ def make_tf_dataset(
     batch_size: int,
     *,
     training: bool = False,
+    shuffle_buffer_size: int = 1024,
+    drop_remainder: bool = False,
 ) -> tf.data.Dataset:
     image_paths = [p[0] for p in pairs]
     mask_paths = [p[1] for p in pairs]
@@ -89,37 +91,82 @@ def make_tf_dataset(
         mask.set_shape([img_size, img_size, 1])
         return image, mask
 
-    def augment(image, mask):
-        # Horizontal flip (applied identically to image and mask)
-        flip = tf.random.uniform(()) > 0.5
-        image = tf.cond(flip, lambda: tf.image.flip_left_right(image), lambda: image)
-        mask = tf.cond(flip, lambda: tf.image.flip_left_right(mask), lambda: mask)
+    def _coarse_erase(image):
+        """Zero out a random rectangle (5–20% of side length) on the image."""
+        h = tf.cast(tf.random.uniform((), 0.05, 0.20) * img_size, tf.int32)
+        w = tf.cast(tf.random.uniform((), 0.05, 0.20) * img_size, tf.int32)
+        y0 = tf.random.uniform((), 0, img_size - h, dtype=tf.int32)
+        x0 = tf.random.uniform((), 0, img_size - w, dtype=tf.int32)
+        rows = tf.range(img_size)
+        cols = tf.range(img_size)
+        row_mask = tf.logical_or(rows < y0, rows >= y0 + h)
+        col_mask = tf.logical_or(cols < x0, cols >= x0 + w)
+        keep = tf.cast(
+            row_mask[:, tf.newaxis] | col_mask[tf.newaxis, :],
+            tf.float32,
+        )[..., tf.newaxis]  # H×W×1
+        return image * keep
 
-        # Brightness / contrast on image only
-        image = tf.image.random_brightness(image, max_delta=0.1)
-        image = tf.image.random_contrast(image, lower=0.9, upper=1.1)
-        image = tf.clip_by_value(image, -1.0, 1.0)  # [-1, 1] after new normalization
+    def augment(image, mask):
+        # ---- Geometric transforms (applied to image AND mask) ----
+
+        # Horizontal flip — use tf.cond so the condition lives in the TF graph
+        hflip = tf.random.uniform(()) > 0.5
+        image = tf.cond(hflip, lambda: tf.image.flip_left_right(image), lambda: image)
+        mask = tf.cond(hflip, lambda: tf.image.flip_left_right(mask), lambda: mask)
+
+        # Vertical flip (low probability; sky is rarely inverted, but aids generalisation)
+        vflip = tf.random.uniform(()) > 0.8
+        image = tf.cond(vflip, lambda: tf.image.flip_up_down(image), lambda: image)
+        mask = tf.cond(vflip, lambda: tf.image.flip_up_down(mask), lambda: mask)
 
         # Rotation ±15°: stack image+mask on channel axis so both get the
         # exact same geometric transform, then split back.
         combined = tf.concat([image, mask], axis=-1)  # H×W×4
-        combined = _rotator(combined[tf.newaxis], training=True)[0]  # add/remove batch dim
+        combined = _rotator(combined[tf.newaxis], training=True)[0]
         image = combined[..., :3]
         mask = combined[..., 3:4]
-        # Rotation fill may push mask values outside {0,1}; hard-threshold.
         mask = tf.cast(mask > 0.5, tf.float32)
+
+        # Coarse dropout — erase a random rectangle on the image only (50% chance)
+        erase = tf.random.uniform(()) > 0.5
+        image = tf.cond(erase, lambda: _coarse_erase(image), lambda: image)
+
+        # ---- Photometric transforms (image only) ----
+
+        # Stronger brightness / contrast (was ±0.1 / 0.9–1.1)
+        image = tf.image.random_brightness(image, max_delta=0.2)
+        image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
+
+        # Subtle hue jitter for sky-colour variation
+        image = tf.image.random_hue(image, max_delta=0.02)
+
+        # Random gamma in [0.7, 1.4] — must be applied in [0, 1] space
+        gamma = tf.random.uniform((), 0.7, 1.4)
+        image_01 = (image + 1.0) / 2.0
+        image_01 = tf.pow(tf.clip_by_value(image_01, 1e-8, 1.0), gamma)
+        image = image_01 * 2.0 - 1.0
+
+        # Low-level Gaussian noise
+        noise = tf.random.normal(tf.shape(image), stddev=0.03)
+        image = image + noise
+
+        # Final clip to keep the [-1, 1] range intact
+        image = tf.clip_by_value(image, -1.0, 1.0)
         return image, mask
 
     def has_foreground(_image, mask):
         return tf.reduce_sum(mask) > 10.0
+
+    effective_buffer = min(shuffle_buffer_size, max(len(pairs), 1))
 
     ds = tf.data.Dataset.from_tensor_slices((image_paths, mask_paths))
     ds = ds.map(load_image_mask, num_parallel_calls=AUTOTUNE)
     # Skip pairs that still fail (e.g. zero-byte files, non-images).
     ds = ds.ignore_errors()
     if training:
-        ds = ds.shuffle(buffer_size=min(1024, max(len(pairs), 1)))
+        ds = ds.shuffle(buffer_size=effective_buffer)
         ds = ds.map(augment, num_parallel_calls=AUTOTUNE)
         ds = ds.repeat()
     ds = ds.filter(has_foreground)
-    return ds.batch(batch_size).prefetch(AUTOTUNE)
+    return ds.batch(batch_size, drop_remainder=drop_remainder).prefetch(AUTOTUNE)
