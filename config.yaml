@@ -2,7 +2,9 @@ dataset:
   path: data
   img_size: 320         # was 224; research spec for mobile-friendly accuracy
   batch_size: 16        # Mac M4: 16–32 | Linux RTX 3090: 64–128
-  shuffle_buffer: 8192  # Mac: 1024 is fine; 3090: 8192 reduces gradient correlation
+  shuffle_buffer: 2048  # RAM cost: N × ~1.6 MB/sample (320px float32 image+mask)
+                        # 2048 ≈ 3.3 GB — safe for most containers; raise to 4096/8192
+                        # only if your container has ≥ 12 GB free system RAM
   drop_remainder: true  # drop last partial batch — required for XLA / stable shapes
 
 training:
