@@ -1,26 +1,21 @@
 #!/bin/bash
-set -euo pipefail
+# DEPRECATED — use scripts/install.sh instead.
+#
+# scripts/install.sh is the new setup wizard. It:
+#   - Detects your OS and architecture (macOS arm64/x86_64, Linux x86_64/aarch64)
+#   - Installs Miniforge3 (conda) if not present
+#   - Creates the "sky-seg" conda environment with Python 3.11
+#   - Installs the correct TensorFlow variant for your platform
+#   - Installs all remaining project dependencies
+#
+# Run:
+#   bash scripts/install.sh
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$PROJECT_ROOT"
-
-echo "Setting up sky segmentation project..."
-
-REQUIRED_CONDA_ENV="sky-seg"
-if [ "${CONDA_DEFAULT_ENV:-}" != "$REQUIRED_CONDA_ENV" ]; then
-  echo "This project expects the conda env: $REQUIRED_CONDA_ENV" >&2
-  echo "Run: conda activate $REQUIRED_CONDA_ENV" >&2
-  exit 1
-fi
-
-echo "Using env: $CONDA_DEFAULT_ENV"
-
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-
-mkdir -p models/pretrained
-mkdir -p logs
-
-echo "Optional (Apple Silicon): pip install -r requirements-macos-metal.txt"
-echo "Setup complete"
+echo ""
+echo "  *** DEPRECATED ***"
+echo "  setup.sh has been replaced by scripts/install.sh."
+echo ""
+echo "  Run the new setup wizard instead:"
+echo "    bash scripts/install.sh"
+echo ""
+exit 1

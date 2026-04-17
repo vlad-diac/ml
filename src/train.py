@@ -36,6 +36,7 @@ def bce_dice_loss(y_true, y_pred):
 
 
 def iou_metric(y_true, y_pred, threshold=0.5):
+    """Kept for loading older checkpoints that serialised this function."""
     y_pred = tf.cast(y_pred > threshold, tf.float32)
     y_true = tf.cast(y_true, tf.float32)
     intersection = tf.reduce_sum(y_true * y_pred, axis=[1, 2, 3])
@@ -44,12 +45,25 @@ def iou_metric(y_true, y_pred, threshold=0.5):
     return tf.reduce_mean(iou)
 
 
+def _make_binary_iou() -> tf.keras.metrics.BinaryIoU:
+    """Factory for BinaryIoU targeting the sky class (class 1)."""
+    return tf.keras.metrics.BinaryIoU(
+        target_class_ids=[1], threshold=0.5, name="binary_iou"
+    )
+
+
+def _denormalize(image: np.ndarray) -> np.ndarray:
+    """Convert [-1, 1] normalized image to [0, 1] for plt.imshow."""
+    return np.clip(image * 0.5 + 0.5, 0.0, 1.0)
+
+
 def keras_custom_objects() -> dict:
     return {
         "dice_loss": dice_loss,
         "combined_loss": combined_loss,
         "bce_dice_loss": bce_dice_loss,
         "iou_metric": iou_metric,
+        "BinaryIoU": tf.keras.metrics.BinaryIoU,
     }
 
 
@@ -220,7 +234,7 @@ class _ValDebugVizCallback(keras.callbacks.Callback):
             mask_np = masks.numpy() if isinstance(masks, tf.Tensor) else masks
             for i in range(n):
                 fig, axes = plt.subplots(1, 3, figsize=(10, 3))
-                axes[0].imshow(img_np[i])
+                axes[0].imshow(_denormalize(img_np[i]))
                 axes[0].set_title("Image")
                 axes[1].imshow(np.squeeze(mask_np[i]))
                 axes[1].set_title("GT")
@@ -367,10 +381,11 @@ def main(
                 f"Warning: checkpoint input width {in_sh[2]} != config img_size {img_size}"
             )
         if model.optimizer is None:
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
             model.compile(
                 optimizer=keras.optimizers.Adam(lr),
                 loss=combined_loss,
-                metrics=[iou_metric],
+                metrics=["accuracy", _make_binary_iou()],
             )
         csv_append = True
     else:
@@ -381,10 +396,11 @@ def main(
             pretrained=pretrained,
             freeze_backbone=freeze_backbone,
         )
+        tf.keras.mixed_precision.set_global_policy("mixed_float16")
         model.compile(
             optimizer=keras.optimizers.Adam(lr),
             loss=combined_loss,
-            metrics=[iou_metric],
+            metrics=["accuracy", _make_binary_iou()],
         )
 
     if initial_epoch >= epochs:
@@ -397,16 +413,22 @@ def main(
     callbacks = [
         keras.callbacks.ModelCheckpoint(
             str(best_path),
-            monitor="val_iou_metric",
+            monitor="val_binary_iou",
             mode="max",
             save_best_only=True,
             verbose=1,
         ),
         keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss", factor=0.5, patience=3, verbose=1
+            monitor="val_binary_iou",
+            factor=0.5,
+            patience=3,
+            min_lr=1e-6,
+            verbose=1,
         ),
         keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=6, restore_best_weights=True
+            monitor="val_binary_iou",
+            patience=8,
+            restore_best_weights=True,
         ),
         keras.callbacks.CSVLogger(str(log_csv), append=csv_append),
         _EpochMetricsTerminalLogger(epochs),

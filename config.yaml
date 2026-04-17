@@ -5,7 +5,7 @@ dataset:
 
 training:
   epochs: 20          # was 10
-  learning_rate: 0.0001  # was 0.001; research spec Adam(1e-4)
+  learning_rate: 0.00005  # lowered from 1e-4 for more stable fine-tuning
   freeze_backbone: false  # fine-tune from layer 100+ (research spec)
   resume_from: null
 

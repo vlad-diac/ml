@@ -1,6 +1,5 @@
-# 2.18.x has no wheels for Python 3.13+; use 2.20+ there.
-tensorflow==2.18.1; python_version < "3.13"
-tensorflow>=2.20.0,<2.22; python_version >= "3.13"
+# TensorFlow is installed by scripts/install.sh (platform-specific variant).
+# Do not add tensorflow here — the correct pip package differs per OS/arch/GPU.
 tensorflow-model-optimization
 opencv-python
 Pillow
