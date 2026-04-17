@@ -1,0 +1,18 @@
+# 2.18.x has no wheels for Python 3.13+; use 2.20+ there.
+tensorflow==2.18.1; python_version < "3.13"
+tensorflow>=2.20.0,<2.22; python_version >= "3.13"
+tensorflow-model-optimization
+opencv-python
+Pillow
+numpy
+matplotlib
+pyyaml
+onnx2tf>=1.24.0  # scripts/onnx_to_tflite.py (ONNX → TFLite)
+tf-keras  # onnx2tf imports tf_keras (not always pulled in by tensorflow)
+onnx>=1.14.0  # onnx2tf (reads ONNX; often not installed as a transitive dep)
+onnx-graphsurgeon  # onnx2tf imports onnx_graphsurgeon
+onnxruntime  # onnx2tf shape / inference paths (avoids missing ort)
+# onnx-simplifier / onnxsim: optional. onnx2tf shells out to `onnxsim`; without it, optimization
+# is skipped (warning only). PyPI often has no arm64 wheel and building needs cmake + a C++ toolchain
+# (`brew install cmake` then `pip install onnxsim`). Do not add to this file unless you pin a
+# version with a wheel for your platform.

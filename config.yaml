@@ -1,0 +1,23 @@
+dataset:
+  path: data
+  img_size: 320       # was 224; research spec for mobile-friendly accuracy
+  batch_size: 16      # was 8
+
+training:
+  epochs: 20          # was 10
+  learning_rate: 0.0001  # was 0.001; research spec Adam(1e-4)
+  freeze_backbone: false  # fine-tune from layer 100+ (research spec)
+  resume_from: null
+
+model:
+  backbone: mobilenetv3large   # was mobilenetv3small
+  head: aspp                   # new; "aspp" requires mobilenetv3large, "unet" requires mobilenetv3small
+  pretrained: imagenet
+
+output:
+  model_path: models/final_model.keras
+  best_model_path: models/best_model.keras
+  log_csv: logs/training_log.csv
+  epoch_checkpoint_dir: models/epoch_ckpt
+  timestamp_run_dir: true  # false = write best/final/epoch_ckpt to paths as-is (no models/DD-MM-YYYY-HH-MM-SS/)
+  debug_viz_every_n_epochs: 1  # only used with --debug-viz; e.g. 2 = every second epoch

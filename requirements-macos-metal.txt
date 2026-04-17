@@ -1,0 +1,2 @@
+# Apple Silicon only — after: pip install -r requirements.txt
+tensorflow-metal
