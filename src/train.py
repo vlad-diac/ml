@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import csv as _csv
 import json
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -126,6 +128,118 @@ def _setup_hardware(train_cfg: dict) -> None:
         print("[hardware] XLA (JIT) disabled")
 
 
+def _get_prev_session_dir(resume_path: Path, meta: dict) -> Path | None:
+    """Derive the previous session folder from meta.json or from the checkpoint path."""
+    if meta.get("session_dir"):
+        p = Path(meta["session_dir"])
+        if p.is_dir():
+            return p
+    # Fallback: epoch checkpoint is one level inside the session root.
+    # e.g. models/17-04-2026-09-19-26/epoch_ckpt_ds/e02_...keras
+    #      → parent.parent = models/17-04-2026-09-19-26/
+    candidate = resume_path.parent.parent
+    if candidate.is_dir():
+        return candidate
+    return None
+
+
+def _get_prev_log_csv(
+    meta: dict, prev_session_dir: Path | None, dataset_name: str | None
+) -> Path | None:
+    """Find the previous session's log CSV via meta.json or known naming patterns."""
+    if meta.get("log_csv_path"):
+        p = Path(meta["log_csv_path"])
+        if p.is_file():
+            return p
+    if prev_session_dir is not None:
+        candidates = [
+            _with_dataset_suffix(prev_session_dir / "training_log.csv", dataset_name),
+            prev_session_dir / "training_log.csv",
+        ]
+        for p in candidates:
+            if p.is_file():
+                return p
+    return None
+
+
+def _seed_csv_from_prev(
+    new_csv: Path, prev_log_csv: Path | None, finished_epoch_0idx: int
+) -> bool:
+    """Write the baseline row (last completed epoch) into the new session CSV.
+
+    The new CSV gets the header + that single seed row so that CSVLogger
+    (opened with append=True) can continue writing from the correct state.
+    Returns True if the seed was written successfully.
+    """
+    if prev_log_csv is None or not prev_log_csv.is_file():
+        return False
+    try:
+        with prev_log_csv.open(newline="", encoding="utf-8") as f:
+            rows = list(_csv.DictReader(f))
+    except Exception as exc:
+        print(f"[train] Warning: could not read previous CSV for seeding: {exc}", flush=True)
+        return False
+    if not rows:
+        return False
+
+    seed_row: dict | None = None
+    for row in rows:
+        try:
+            if int(float(row.get("epoch", -1))) == finished_epoch_0idx:
+                seed_row = row
+                break
+        except (ValueError, TypeError):
+            continue
+    if seed_row is None:
+        seed_row = rows[-1]  # fallback: last row in file
+
+    try:
+        new_csv.parent.mkdir(parents=True, exist_ok=True)
+        with new_csv.open("w", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=list(seed_row.keys()))
+            writer.writeheader()
+            writer.writerow(seed_row)
+        print(
+            f"[train] Seeded new CSV with epoch={seed_row.get('epoch')} "
+            f"row from {prev_log_csv.name}",
+            flush=True,
+        )
+        return True
+    except Exception as exc:
+        print(f"[train] Warning: could not write seed CSV: {exc}", flush=True)
+        return False
+
+
+def _copy_prev_debug_viz(
+    prev_session_dir: Path | None, initial_epoch: int, new_viz_dir: Path
+) -> None:
+    """Copy epoch_{initial_epoch:02d}_val_sample_*.png from the previous session folder.
+
+    `initial_epoch` is the epoch index training will start at; the last
+    *completed* epoch produced files named epoch_{initial_epoch:02d}_*.png
+    (because human_epoch = epoch_0idx + 1, and checkpoint e{N} → initial_epoch N+1).
+    """
+    if prev_session_dir is None:
+        return
+    prev_viz_dir = prev_session_dir / "debug_viz"
+    if not prev_viz_dir.is_dir():
+        return
+    pattern = f"epoch_{initial_epoch:02d}_val_sample_*.png"
+    files = sorted(prev_viz_dir.glob(pattern))
+    if not files:
+        print(
+            f"[debug-viz] No files matching {pattern} found in {prev_viz_dir}; "
+            "skipping copy.",
+            flush=True,
+        )
+        return
+    new_viz_dir.mkdir(parents=True, exist_ok=True)
+    for src in files:
+        dst = new_viz_dir / src.name
+        shutil.copy2(src, dst)
+        print(f"[debug-viz] Copied from prev session: {src.name}", flush=True)
+
+
 def _safe_dataset_name(name: str) -> str:
     name = name.strip()
     if not name:
@@ -179,6 +293,8 @@ class _PerEpochCheckpointWithMeta(keras.callbacks.Callback):
         head: str,
         pretrained: str | None,
         freeze_backbone: bool,
+        session_dir: Path,
+        log_csv_path: Path,
     ) -> None:
         super().__init__()
         self._directory = directory
@@ -193,6 +309,8 @@ class _PerEpochCheckpointWithMeta(keras.callbacks.Callback):
         self._head = head
         self._pretrained = pretrained
         self._freeze_backbone = freeze_backbone
+        self._session_dir = session_dir
+        self._log_csv_path = log_csv_path
 
     def on_epoch_end(self, epoch, logs=None) -> None:
         self._directory.mkdir(parents=True, exist_ok=True)
@@ -220,6 +338,8 @@ class _PerEpochCheckpointWithMeta(keras.callbacks.Callback):
             "freeze_backbone": self._freeze_backbone,
             "weights_path": str(ckpt_path.resolve()),
             "finished_epoch": epoch,
+            "session_dir": str(self._session_dir.resolve()),
+            "log_csv_path": str(self._log_csv_path.resolve()),
         }
         meta_path = ckpt_path.with_name(ckpt_path.stem + ".meta.json")
         meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -374,9 +494,13 @@ def main(
     final_path = _with_dataset_suffix(
         _model_output_path(out_cfg["model_path"]), dataset_name
     )
-    log_csv = _with_dataset_suffix(
-        Path(out_cfg.get("log_csv", "logs/training_log.csv")), dataset_name
-    )
+    # When using a session folder, co-locate the CSV there; otherwise use the
+    # configured path so that timestamp_run_dir=false keeps the old behaviour.
+    _log_csv_base = Path(out_cfg.get("log_csv", "logs/training_log.csv"))
+    if models_run_root is not None:
+        log_csv = _with_dataset_suffix(models_run_root / _log_csv_base.name, dataset_name)
+    else:
+        log_csv = _with_dataset_suffix(_log_csv_base, dataset_name)
 
     for p in (best_path.parent, final_path.parent, log_csv.parent):
         p.mkdir(parents=True, exist_ok=True)
@@ -422,19 +546,30 @@ def main(
         initial_epoch = _read_resume_initial_epoch(resume_path)
         print(f"initial_epoch={initial_epoch} (target epochs={epochs})")
         meta_path = resume_path.with_name(resume_path.stem + ".meta.json")
+        resume_meta: dict = {}
         if meta_path.is_file():
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            meta_ds = meta.get("dataset_name")
+            resume_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta_ds = resume_meta.get("dataset_name")
             if meta_ds is not None and meta_ds != dataset_name:
                 print(
                     f"Warning: checkpoint dataset_name={meta_ds!r} "
                     f"!= current --dataset {dataset_name!r}"
                 )
-            if int(meta.get("img_size", img_size)) != img_size:
+            if int(resume_meta.get("img_size", img_size)) != img_size:
                 print(
                     "Warning: checkpoint img_size in meta differs from config "
-                    f"({meta.get('img_size')} vs {img_size})"
+                    f"({resume_meta.get('img_size')} vs {img_size})"
                 )
+
+        # Locate previous session folder + CSV for seeding
+        prev_session_dir = _get_prev_session_dir(resume_path, resume_meta)
+        prev_log_csv = _get_prev_log_csv(resume_meta, prev_session_dir, dataset_name)
+        # finished_epoch_0idx: the 0-based epoch whose checkpoint we're resuming from
+        finished_epoch_0idx = initial_epoch - 1
+        csv_seeded = _seed_csv_from_prev(log_csv, prev_log_csv, finished_epoch_0idx)
+        # CSVLogger will append rows; if we seeded the file it already has a header
+        csv_append = True
+
         model = keras.models.load_model(
             str(resume_path),
             custom_objects=keras_custom_objects(),
@@ -457,7 +592,6 @@ def main(
                 loss=combined_loss,
                 metrics=["accuracy", _make_binary_iou()],
             )
-        csv_append = True
     else:
         model = build_model(
             img_size,
@@ -527,12 +661,20 @@ def main(
                 head=head,
                 pretrained=pretrained,
                 freeze_backbone=freeze_backbone,
+                session_dir=models_run_root if models_run_root is not None else epoch_dir.parent,
+                log_csv_path=log_csv,
             )
         )
 
     if debug_viz:
-        viz_dir = log_csv.parent / "debug_viz"
+        # Always keep debug_viz inside the session folder so all artefacts
+        # for a run are co-located; fall back to log_csv's parent when there
+        # is no session folder (timestamp_run_dir=false).
+        viz_dir = (models_run_root if models_run_root is not None else log_csv.parent) / "debug_viz"
         viz_every = int(out_cfg.get("debug_viz_every_n_epochs", 1))
+        # On resume, copy the last completed epoch's images into the new session.
+        if resume_path is not None:
+            _copy_prev_debug_viz(prev_session_dir, initial_epoch, viz_dir)
         callbacks.append(
             _ValDebugVizCallback(
                 val_ds,
