@@ -252,11 +252,12 @@ _install_packages() {
 _create_dirs() {
     mkdir -p "${PROJECT_ROOT}/models/pretrained"
     mkdir -p "${PROJECT_ROOT}/logs"
+    mkdir -p "${PROJECT_ROOT}/logs/tensorboard"
     _info "Project directories ready."
 }
 
 # ---------------------------------------------------------------------------
-# 8. Verify TensorFlow installation
+# 8. Verify TensorFlow and TensorBoard installation
 # ---------------------------------------------------------------------------
 _verify() {
     echo ""
@@ -271,6 +272,18 @@ _verify() {
         echo "$result"
         echo ""
         _warn "TensorFlow may still work; check the output above."
+    }
+
+    _info "Verifying TensorBoard installation..."
+    local tb_result
+    tb_result=$(conda run -n "$ENV_NAME" python -c \
+        "import tensorboard; print('TensorBoard', tensorboard.__version__, '— OK')" \
+        2>&1) && {
+        _info "$tb_result"
+    } || {
+        _warn "TensorBoard verification failed:"
+        echo "$tb_result"
+        _warn "Try: conda run -n $ENV_NAME pip install tensorboard"
     }
 }
 

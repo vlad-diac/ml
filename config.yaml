@@ -29,4 +29,5 @@ output:
   log_csv: logs/training_log.csv
   epoch_checkpoint_dir: models/epoch_ckpt
   timestamp_run_dir: true  # false = write best/final/epoch_ckpt to paths as-is (no models/DD-MM-YYYY-HH-MM-SS/)
+  tensorboard_log_dir: logs/tensorboard
   debug_viz_every_n_epochs: 1  # only used with --debug-viz; e.g. 2 = every second epoch

@@ -1,5 +1,6 @@
 # TensorFlow is installed by scripts/install.sh (platform-specific variant).
 # Do not add tensorflow here — the correct pip package differs per OS/arch/GPU.
+tensorboard
 tensorflow-model-optimization
 opencv-python
 Pillow

@@ -502,7 +502,15 @@ def main(
     else:
         log_csv = _with_dataset_suffix(_log_csv_base, dataset_name)
 
-    for p in (best_path.parent, final_path.parent, log_csv.parent):
+    # TensorBoard log directory — co-located with the session when timestamp_run_dir=true,
+    # otherwise falls back to the configured path (default: logs/tensorboard).
+    _tb_base = Path(out_cfg.get("tensorboard_log_dir", "logs/tensorboard"))
+    if models_run_root is not None:
+        tb_log_dir = _with_dataset_suffix(models_run_root / _tb_base.name, dataset_name)
+    else:
+        tb_log_dir = _with_dataset_suffix(_tb_base, dataset_name)
+
+    for p in (best_path.parent, final_path.parent, log_csv.parent, tb_log_dir):
         p.mkdir(parents=True, exist_ok=True)
 
     _setup_hardware(train_cfg)
@@ -636,6 +644,11 @@ def main(
             restore_best_weights=True,
         ),
         keras.callbacks.CSVLogger(str(log_csv), append=csv_append),
+        keras.callbacks.TensorBoard(
+            log_dir=str(tb_log_dir),
+            histogram_freq=1,
+            update_freq="epoch",
+        ),
         _EpochMetricsTerminalLogger(epochs),
     ]
 
@@ -690,6 +703,7 @@ def main(
         f"{log_csv.resolve()}",
         flush=True,
     )
+    print(f"[train] TensorBoard logs: {tb_log_dir.resolve()}", flush=True)
 
     model.fit(
         train_ds,
