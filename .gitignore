@@ -23,3 +23,4 @@ venv/
 .env.test
 .env.production
 data/
+output/
